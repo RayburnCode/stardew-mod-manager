@@ -1,0 +1,2 @@
+# stardew-mod-manager
+
