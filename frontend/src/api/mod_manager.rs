@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 /// Deserialized from each mod's `manifest.json`.
 /// Fields match SMAPI's manifest spec exactly.
 /// Unknown fields are ignored via `deny_unknown_fields = false` (default).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ModManifest {
     pub name: String,
@@ -48,7 +48,7 @@ impl ModManifest {
 }
 
 /// A discovered mod: its manifest plus where it lives on disk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InstalledMod {
     pub manifest: ModManifest,
     /// The mod's own subfolder, e.g. `.../Mods/CJB Cheats Menu/`

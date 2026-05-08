@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use anyhow::{bail, Context, Result};
 
-use crate::paths;
+use crate::api::paths;
 
 const BASE_URL: &str = "https://api.nexusmods.com/v1";
 const GAME_DOMAIN: &str = "stardewvalley";
@@ -222,12 +222,13 @@ impl NexusClient {
                         if let Err(e) = handle_rate_limit(&resp) {
                             Err(e)
                         } else {
-                            resp.error_for_status()
-                                .context("API error")?
-                                .json::<NexusModInfo>()
-                                .await
-                                .context("Parse error")
-                                .map_err(Into::into)
+                            match resp.error_for_status() {
+                                Ok(success_resp) => match success_resp.json::<NexusModInfo>().await {
+                                    Ok(info) => Ok(info),
+                                    Err(e) => Err(anyhow::anyhow!("Parse error: {}", e)),
+                                },
+                                Err(e) => Err(anyhow::anyhow!("API error: {}", e)),
+                            }
                         }
                     }
                 };

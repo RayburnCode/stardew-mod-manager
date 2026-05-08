@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
 
-use crate::mods::ModManifest;
-use crate::paths;
+use crate::api::mod_manager::ModManifest;
+use crate::api::paths;
 
 // ─── Progress reporting ───────────────────────────────────────────────────────
 
@@ -157,15 +157,15 @@ fn backup_mod(mod_path: &Path) -> Result<PathBuf> {
 
     eprintln!("[updater] Backup created: {}", backup_path.display());
     Ok(backup_path)
-}
+} 
 
 /// Compress a directory into a zip file.
 fn zip_directory(src: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::create(dest)
         .with_context(|| format!("Cannot create zip: {}", dest.display()))?;
-
+  
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::FileOptions::default()
+    let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
     let prefix = src.parent().unwrap_or(src);
@@ -177,10 +177,12 @@ fn zip_directory(src: &Path, dest: &Path) -> Result<()> {
             .context("Failed to compute relative path")?;
 
         if path.is_dir() {
-            zip.add_directory(relative.to_string_lossy(), options)
+            let name = relative.to_string_lossy().into_owned();
+            zip.add_directory(name, options)
                 .context("Failed to add directory to zip")?;
         } else {
-            zip.start_file(relative.to_string_lossy(), options)
+            let name = relative.to_string_lossy().into_owned();
+            zip.start_file(name, options)
                 .context("Failed to start zip file entry")?;
 
             let mut f = std::fs::File::open(path)

@@ -142,7 +142,7 @@ pub fn delete_api_key(config: &mut AppConfig) -> Result<()> {
         .context("Failed to access OS keychain")?;
 
     // Ignore NoEntry — deleting a key that doesn't exist is a no-op
-    match entry.delete_credential() {
+    match entry.delete_password() {
         Ok(_) | Err(keyring::Error::NoEntry) => {}
         Err(e) => return Err(e).context("Failed to delete API key from keychain"),
     }
