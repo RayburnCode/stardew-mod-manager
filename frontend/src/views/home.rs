@@ -3,8 +3,7 @@
 use dioxus::prelude::*;
 
 
-use crate::mod_list::ModList;
-use crate::settings::Settings;
+use crate::views::{InstallZone, ModList, Settings};
 
 // ─── App state ────────────────────────────────────────────────────────────────
 
@@ -16,10 +15,10 @@ use crate::settings::Settings;
 #[component]
 pub fn Home() -> Element {
     // Load config once on startup
-    let config = config::AppConfig::load().unwrap_or_default();
+    let config = crate::api::config::AppConfig::load().unwrap_or_default();
 
-    let state = AppState {
-        screen:     use_signal(|| Screen::ModList),
+    let state = crate::api::app_state::AppState {
+        screen:     use_signal(|| crate::api::app_state::Screen::ModList),
         config:     use_signal(|| config),
         mods:       use_signal(Vec::new),
         loading:    use_signal(|| false),
@@ -51,10 +50,13 @@ pub fn Home() -> Element {
             // ── Main content area ─────────────────────────────────────────────
             div { style: "flex: 1; overflow: hidden; display: flex; flex-direction: column;",
                 match screen {
-                    Screen::ModList => rsx! {
+                    crate::api::app_state::Screen::ModList => rsx! {
                         ModList {}
                     },
-                    Screen::Settings => rsx! {
+                    crate::api::app_state::Screen::Installer => rsx! {
+                        InstallZone {}
+                    },
+                    crate::api::app_state::Screen::Settings => rsx! {
                         Settings {}
                     },
                 }
@@ -67,7 +69,7 @@ pub fn Home() -> Element {
 
 #[component]
 fn TopBar() -> Element {
-    let mut state: AppState = use_context();
+    let mut state: crate::api::app_state::AppState = use_context();
     let screen = state.screen.read().clone();
 
     rsx! {
@@ -98,13 +100,18 @@ fn TopBar() -> Element {
 
                 NavTab {
                     label: "Mods",
-                    active: screen == Screen::ModList,
-                    onclick: move |_| *state.screen.write() = Screen::ModList,
+                    active: screen == crate::api::app_state::Screen::ModList,
+                    onclick: move |_| *state.screen.write() = crate::api::app_state::Screen::ModList,
+                }
+                NavTab {
+                    label: "Install",
+                    active: screen == crate::api::app_state::Screen::Installer,
+                    onclick: move |_| *state.screen.write() = crate::api::app_state::Screen::Installer,
                 }
                 NavTab {
                     label: "Settings",
-                    active: screen == Screen::Settings,
-                    onclick: move |_| *state.screen.write() = Screen::Settings,
+                    active: screen == crate::api::app_state::Screen::Settings,
+                    onclick: move |_| *state.screen.write() = crate::api::app_state::Screen::Settings,
                 }
             }
         }
@@ -114,7 +121,7 @@ fn TopBar() -> Element {
 #[component]
 fn NavTab(label: &'static str, active: bool, onclick: EventHandler<MouseEvent>) -> Element {
     let bg    = if active { "#1a2035" } else { "transparent" };
-    let color = if active { "#7ec8a4" } else { "#6b7280" };
+    let color = if active { "#7ec8a4" } else { "#b0b8c7" };
 
     rsx! {
         button {

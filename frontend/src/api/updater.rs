@@ -87,6 +87,7 @@ pub async fn install_update(
 /// Returns the path to the temp file on success.
 async fn download_to_temp(url: &str, on_progress: Option<ProgressCallback>) -> Result<PathBuf> {
     let client = reqwest::Client::builder()
+        .http1_only()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .context("Failed to build HTTP client")?;
@@ -158,6 +159,11 @@ fn backup_mod(mod_path: &Path) -> Result<PathBuf> {
     eprintln!("[updater] Backup created: {}", backup_path.display());
     Ok(backup_path)
 } 
+
+/// Public helper used by installer flow before replacing an existing mod folder.
+pub fn backup_existing(mod_path: &Path) -> Result<PathBuf> {
+    backup_mod(mod_path)
+}
 
 /// Compress a directory into a zip file.
 fn zip_directory(src: &Path, dest: &Path) -> Result<()> {

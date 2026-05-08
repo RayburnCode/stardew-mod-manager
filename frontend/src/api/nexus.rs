@@ -139,6 +139,7 @@ impl NexusClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .http1_only()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .context("Failed to build HTTP client")?;

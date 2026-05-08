@@ -4,10 +4,11 @@
 // a toolbar for scanning/refreshing, and per-row update actions.
 
 use dioxus::prelude::*;
-use crate::api::app_state::{AppState, Screen};
+use crate::api::app_state::AppState;
 use crate::api::mod_manager::{InstalledMod, ModStatus};
 //use crate::api::config;
 use crate::api::nexus::NexusClient;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── ModList view ─────────────────────────────────────────────────────────────
 
@@ -19,13 +20,7 @@ pub fn ModList() -> Element {
     let error   = state.error.read().clone();
 
     rsx! {
-        div {
-            style: "
-                display: flex;
-                flex-direction: column;
-                height: 100%;
-                overflow: hidden;
-            ",
+        div { class: "flex flex-col h-full overflow-hidden",
 
             // ── Toolbar ───────────────────────────────────────────────────────
             Toolbar {}
@@ -36,8 +31,7 @@ pub fn ModList() -> Element {
             }
 
             // ── Content area ──────────────────────────────────────────────────
-            div {
-                style: "flex: 1; overflow-y: auto; padding: 0 20px 20px;",
+            div { class: "flex-1 overflow-y-auto px-5 pb-5",
 
                 if loading {
                     LoadingState {}
@@ -46,9 +40,14 @@ pub fn ModList() -> Element {
                 } else {
                     // Summary row
                     {
-                        let total    = mods.len();
-                        let updates  = mods.iter().filter(|m| matches!(m.status, ModStatus::UpdateAvailable { .. })).count();
-                        rsx! { SummaryBar { total, updates } }
+                        let total = mods.len();
+                        let updates = mods
+                            .iter()
+                            .filter(|m| matches!(m.status, ModStatus::UpdateAvailable { .. }))
+                            .count();
+                        rsx! {
+                            SummaryBar { total, updates }
+                        }
                     }
 
                     // Column headers
@@ -68,11 +67,14 @@ pub fn ModList() -> Element {
 
 #[component]
 fn Toolbar() -> Element {
-    let mut state: AppState = use_context();
+    let state: AppState = use_context();
+    let state_for_scan = state.clone();
+    let state_for_check = state.clone();
+    let loading = *state.loading.read();
 
-    // Scan mods and then fetch Nexus data
+    // Scan mods folder and then fetch Nexus data
     let on_scan = move |_| {
-        let mut state = state.clone();
+        let mut state = state_for_scan.clone();
         spawn(async move {
             *state.error.write() = None;
             *state.loading.write() = true;
@@ -113,7 +115,7 @@ fn Toolbar() -> Element {
                     return;
                 }
                 Err(e) => {
-                    *state.error.write() = Some(format!("Keychain error: {e}"));
+                    *state.error.write() = Some(format!("API key read error: {e}"));
                     *state.loading.write() = false;
                     return;
                 }
@@ -144,7 +146,10 @@ fn Toolbar() -> Element {
                         m.status = match results.get(&nexus_id) {
                             Some(Ok(info)) => {
                                 if crate::api::mod_manager::is_update_available(&m.manifest.version, &info.version) {
-                                    ModStatus::UpdateAvailable { latest: info.version.clone() }
+                                    ModStatus::UpdateAvailable {
+                                        latest: info.version.clone(),
+                                        updated_timestamp: Some(info.updated_timestamp),
+                                    }
                                 } else {
                                     ModStatus::UpToDate
                                 }
@@ -162,42 +167,138 @@ fn Toolbar() -> Element {
         });
     };
 
-    rsx! {
-        div {
-            style: "
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                padding: 14px 20px;
-                border-bottom: 1px solid #1e2130;
-                flex-shrink: 0;
-            ",
+    // Check updates via both SMAPI (all mods, no key needed) and Nexus (if API
+    // key is configured). Results are merged: whichever source reports the
+    // newer version wins.
+    let on_check_updates = move |_| {
+        let mut state = state_for_check.clone();
+        spawn(async move {
+            *state.error.write() = None;
+            *state.loading.write() = true;
 
-            // Scan button
-            button {
-                onclick: on_scan,
-                style: "
-                    background: #7ec8a4;
-                    color: #0c0e14;
-                    border: none;
-                    padding: 7px 16px;
-                    border-radius: 6px;
-                    font-size: 13px;
-                    font-family: inherit;
-                    font-weight: 600;
-                    cursor: pointer;
-                    letter-spacing: 0.02em;
-                ",
-                "Scan Mods"
+            let config = state.config.read().clone();
+            let base_mods = if state.mods.read().is_empty() {
+                let Some(mods_path) = config.resolved_mods_path() else {
+                    *state.error.write() = Some(
+                        "No Stardew Valley Mods folder found. Set a path in Settings.".into()
+                    );
+                    *state.loading.write() = false;
+                    return;
+                };
+                match crate::api::mod_manager::discover_mods(&mods_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        *state.error.write() = Some(format!("Scan failed: {e}"));
+                        *state.loading.write() = false;
+                        return;
+                    }
+                }
+            } else {
+                state.mods.read().clone()
+            };
+
+            if base_mods.is_empty() {
+                *state.mods.write() = base_mods;
+                *state.loading.write() = false;
+                return;
             }
 
-            // Spacer
-            div { style: "flex: 1;" }
+            // SMAPI — covers all update_keys sources, no API key required
+            let smapi_updates = crate::api::smapi_api::fetch_latest_versions(&base_mods)
+                .await
+                .unwrap_or_default();
 
-            // Filter pill: updates only (future enhancement placeholder)
-            span {
-                style: "font-size: 12px; color: #4b5563;",
-                "Auto-refreshes from cache"
+            // Nexus — only if an API key is configured
+            let nexus_results = if config.nexus_api_key_saved {
+                if let Ok(Some(api_key)) = crate::api::config::load_api_key() {
+                    match NexusClient::new(&api_key, config.cache_ttl_seconds) {
+                        Ok(mut client) => {
+                            let nexus_ids: Vec<u32> = base_mods
+                                .iter()
+                                .filter_map(|m| m.manifest.nexus_id())
+                                .collect();
+                            client.fetch_many(&nexus_ids).await
+                        }
+                        Err(_) => std::collections::HashMap::new(),
+                    }
+                } else {
+                    std::collections::HashMap::new()
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+            // Merge: prefer whichever source reports the newer version
+            let updated_mods: Vec<InstalledMod> = base_mods
+                .into_iter()
+                .map(|mut m| {
+                    let smapi_latest = smapi_updates.get(&m.manifest.unique_id).cloned();
+                    let nexus_latest = m.manifest.nexus_id()
+                        .and_then(|id| nexus_results.get(&id))
+                        .and_then(|r| r.as_ref().ok())
+                        .filter(|info| crate::api::mod_manager::is_update_available(&m.manifest.version, &info.version))
+                        .map(|info| (info.version.clone(), Some(info.updated_timestamp)));
+
+                    let best = match (smapi_latest, nexus_latest) {
+                        (Some(s), Some(n)) => {
+                            // Both report an update — pick the higher version
+                            Some(if crate::api::mod_manager::is_update_available(&s.latest_version, &n.0) {
+                                n
+                            } else {
+                                (s.latest_version, s.updated_timestamp)
+                            })
+                        }
+                        (Some(s), None) => Some((s.latest_version, s.updated_timestamp)),
+                        (None, Some(n)) => Some(n),
+                        (None, None) => None,
+                    };
+
+                    m.status = if let Some((latest, updated_timestamp)) = best {
+                        ModStatus::UpdateAvailable {
+                            latest,
+                            updated_timestamp,
+                        }
+                    } else {
+                        ModStatus::UpToDate
+                    };
+                    m
+                })
+                .collect();
+
+            *state.mods.write() = updated_mods;
+            *state.loading.write() = false;
+        });
+    };
+
+    rsx! {
+        div { class: "flex items-center justify-between gap-4 px-5 py-3.5 border-b border-[#1e2130] shrink-0",
+            div { class: "flex flex-col gap-1",
+                span { class: "text-xs uppercase tracking-[0.08em] text-[#9ca3af]",
+                    "Step 1: Scan   Step 2: Check updates"
+                }
+                span { class: "text-xs text-[#aab0bb]",
+                    "Scan reads your Mods folder. Check updates compares installed versions with SMAPI/Nexus."
+                }
+            }
+
+            div { class: "flex items-center gap-2.5",
+                button {
+                    onclick: on_scan,
+                    disabled: loading,
+                    class: if loading { "bg-[#7ec8a4] text-[#0c0e14] border-none py-[7px] px-4 rounded-md text-[13px] font-[inherit] font-semibold tracking-[0.02em] opacity-60 cursor-not-allowed" } else { "bg-[#7ec8a4] text-[#0c0e14] border-none py-[7px] px-4 rounded-md text-[13px] font-[inherit] font-semibold cursor-pointer tracking-[0.02em]" },
+                    if loading {
+                        "Scanning..."
+                    } else {
+                        "Scan Mods Folder"
+                    }
+                }
+
+                button {
+                    onclick: on_check_updates,
+                    disabled: loading,
+                    class: if loading { "bg-[#1a2035] text-[#7ec8a4] border border-[#2d3552] py-[7px] px-3.5 rounded-md text-[13px] font-[inherit] font-semibold tracking-[0.02em] opacity-60 cursor-not-allowed" } else { "bg-[#1a2035] text-[#7ec8a4] border border-[#2d3552] py-[7px] px-3.5 rounded-md text-[13px] font-[inherit] font-semibold cursor-pointer tracking-[0.02em]" },
+                    "Check for Updates"
+                }
             }
         }
     }
@@ -207,27 +308,17 @@ fn Toolbar() -> Element {
 
 #[component]
 fn SummaryBar(total: usize, updates: usize) -> Element {
+    let update_label = format!(
+        "{updates} update{} available",
+        if updates == 1 { "" } else { "s" }
+    );
+
     rsx! {
-        div {
-            style: "
-                display: flex;
-                align-items: center;
-                gap: 16px;
-                padding: 14px 0 10px;
-                font-size: 12px;
-                color: #6b7280;
-            ",
+        div { class: "flex items-center gap-4 py-3.5 pb-2.5 text-xs text-[#aab0bb]",
             span { "{total} mods installed" }
             if updates > 0 {
-                span {
-                    style: "
-                        background: #1a2d1f;
-                        color: #7ec8a4;
-                        padding: 2px 10px;
-                        border-radius: 99px;
-                        font-weight: 600;
-                    ",
-                    "{updates} update{if updates == 1 { \"\" } else { \"s\" }} available"
+                span { class: "rounded-full bg-[#1a2d1f] px-2.5 py-0.5 font-semibold text-[#7ec8a4]",
+                    "{update_label}"
                 }
             }
         }
@@ -240,19 +331,8 @@ fn SummaryBar(total: usize, updates: usize) -> Element {
 fn ModTableHeader() -> Element {
     rsx! {
         div {
-            style: "
-                display: grid;
-                grid-template-columns: 1fr 120px 120px 140px;
-                gap: 12px;
-                padding: 6px 12px;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 0.08em;
-                text-transform: uppercase;
-                color: #4b5563;
-                border-bottom: 1px solid #1e2130;
-                margin-bottom: 4px;
-            ",
+            class: "grid gap-3 px-3 py-1.5 text-[11px] font-semibold tracking-[0.08em] uppercase text-[#9ca3af] border-b border-[#1e2130] mb-1",
+            style: "grid-template-columns: 1fr 120px 120px 140px;",
             span { "Name" }
             span { "Installed" }
             span { "Latest" }
@@ -265,22 +345,28 @@ fn ModTableHeader() -> Element {
 
 #[component]
 fn ModRow(mod_data: InstalledMod) -> Element {
-    let mut state: AppState = use_context();
+    let state: AppState = use_context();
     let name    = mod_data.manifest.name.clone();
     let author  = mod_data.manifest.author.clone();
     let version = mod_data.manifest.version.clone();
 
-    let (latest_text, status_el) = match &mod_data.status {
+    let (latest_text, latest_age_text, status_el) = match &mod_data.status {
         ModStatus::UpToDate => (
             version.clone(),
+            None,
             rsx! {
-                StatusPill { color: "#1a2d1f", text_color: "#7ec8a4", label: "Up to date" }
+                StatusPill {
+                    color: "#1a2d1f",
+                    text_color: "#7ec8a4",
+                    label: "Up to date",
+                }
             },
         ),
-        ModStatus::UpdateAvailable { latest } => {
+        ModStatus::UpdateAvailable { latest, updated_timestamp } => {
             let latest = latest.clone();
             let mod_path = mod_data.path.clone();
             let dl_latest = latest.clone();
+            let updated_ago = updated_timestamp.and_then(format_relative_age);
 
             let on_update = move |_| {
                 let mut state = state.clone();
@@ -292,7 +378,7 @@ fn ModRow(mod_data: InstalledMod) -> Element {
 
                     // Get the API key and build client
                     let config = state.config.read().clone();
-                    let api_key = match crate::config::load_api_key() {
+                    let api_key = match crate::api::config::load_api_key() {
                         Ok(Some(k)) => k,
                         _ => {
                             *state.error.write() = Some("No API key — add one in Settings.".into());
@@ -309,7 +395,7 @@ fn ModRow(mod_data: InstalledMod) -> Element {
                     };
 
                     // Get Nexus ID from the mod's manifest
-                    let nexus_id = match crate::mods::discover_mods(&mod_path.parent().unwrap_or(&mod_path))
+                    let nexus_id = match crate::api::mod_manager::discover_mods(&mod_path.parent().unwrap_or(&mod_path))
                         .ok()
                         .and_then(|mods| mods.into_iter().find(|m| m.path == mod_path))
                         .and_then(|m| m.manifest.nexus_id())
@@ -340,7 +426,7 @@ fn ModRow(mod_data: InstalledMod) -> Element {
                     };
 
                     // Run the update
-                    match crate::updater::install_update(&mod_path, &url, &expected, None).await {
+                    match crate::api::updater::install_update(&mod_path, &url, &expected, None).await {
                         Ok(_) => {
                             // Re-scan to reflect new version
                             // (simplest approach: just mark the mod as up-to-date in place)
@@ -359,24 +445,17 @@ fn ModRow(mod_data: InstalledMod) -> Element {
 
             (
                 latest.clone(),
+                updated_ago,
                 rsx! {
-                    div {
-                        style: "display: flex; align-items: center; gap: 8px;",
-                        StatusPill { color: "#2d1f0a", text_color: "#f0a050", label: "Update" }
+                    div { class: "flex items-center gap-2",
+                        StatusPill {
+                            color: "#2d1f0a",
+                            text_color: "#f0a050",
+                            label: "Update",
+                        }
                         button {
                             onclick: on_update,
-                            style: "
-                                background: #f0a050;
-                                color: #0c0e14;
-                                border: none;
-                                padding: 3px 10px;
-                                border-radius: 5px;
-                                font-size: 11px;
-                                font-family: inherit;
-                                font-weight: 700;
-                                cursor: pointer;
-                                letter-spacing: 0.04em;
-                            ",
+                            class: "bg-[#f0a050] text-[#0c0e14] border-none py-[3px] px-2.5 rounded-[5px] text-[11px] font-[inherit] font-bold cursor-pointer tracking-[0.04em]",
                             "↑ Install"
                         }
                     }
@@ -385,57 +464,98 @@ fn ModRow(mod_data: InstalledMod) -> Element {
         }
         ModStatus::FetchFailed { .. } => (
             "—".into(),
-            rsx! { StatusPill { color: "#2d1519", text_color: "#e06060", label: "Fetch error" } },
+            None,
+            rsx! {
+                StatusPill {
+                    color: "#2d1519",
+                    text_color: "#e06060",
+                    label: "Fetch error",
+                }
+            },
         ),
         ModStatus::Unknown => (
             "—".into(),
-            rsx! { StatusPill { color: "#1a1c24", text_color: "#4b5563", label: "No source" } },
+            None,
+            rsx! {
+                StatusPill {
+                    color: "#1a1c24",
+                    text_color: "#aab0bb",
+                    label: "No source",
+                }
+            },
         ),
     };
 
     rsx! {
         div {
-            style: "
-                display: grid;
-                grid-template-columns: 1fr 120px 120px 140px;
-                gap: 12px;
-                align-items: center;
-                padding: 10px 12px;
-                border-radius: 7px;
-                margin-bottom: 2px;
-                background: #0f1117;
-                border: 1px solid #1e2130;
-                transition: border-color 0.15s;
-            ",
+            class: "grid gap-3 items-center px-3 py-2.5 rounded-[7px] mb-0.5 bg-[#0f1117] border border-[#1e2130] transition-colors duration-150",
+            style: "grid-template-columns: 1fr 120px 120px 140px;",
 
             // Name + author
             div {
-                div {
-                    style: "font-size: 13px; color: #e8e6df; font-weight: 500;",
-                    "{name}"
-                }
-                div {
-                    style: "font-size: 11px; color: #4b5563; margin-top: 1px;",
-                    "{author}"
-                }
+                div { class: "text-[13px] text-[#e8e6df] font-medium", "{name}" }
+                div { class: "text-[11px] text-[#aab0bb] mt-px", "{author}" }
             }
 
             // Installed version
-            span {
-                style: "font-size: 12px; color: #6b7280; font-variant-numeric: tabular-nums;",
-                "{version}"
-            }
+            span { class: "text-xs text-[#b0b8c7] tabular-nums", "{version}" }
 
-            // Latest version
-            span {
-                style: "font-size: 12px; color: #6b7280; font-variant-numeric: tabular-nums;",
-                "{latest_text}"
+            // Latest version + relative update age if known
+            div { class: "flex flex-col",
+                span { class: "text-xs text-[#b0b8c7] tabular-nums", "{latest_text}" }
+                if let Some(age) = latest_age_text {
+                    span { class: "text-[10px] text-[#8d95a3]", "Updated {age}" }
+                }
             }
 
             // Status / action
-            { status_el }
+            {status_el}
         }
     }
+}
+
+fn format_relative_age(updated_timestamp: u64) -> Option<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    if updated_timestamp > now {
+        return None;
+    }
+
+    let delta = now.saturating_sub(updated_timestamp);
+    if delta < 60 {
+        return Some("just now".to_string());
+    }
+
+    if delta < 3_600 {
+        let mins = delta / 60;
+        return Some(format!("{mins} min{} ago", if mins == 1 { "" } else { "s" }));
+    }
+
+    if delta < 86_400 {
+        let hours = delta / 3_600;
+        return Some(format!("{hours} hour{} ago", if hours == 1 { "" } else { "s" }));
+    }
+
+    if delta < 604_800 {
+        let days = delta / 86_400;
+        return Some(format!("{days} day{} ago", if days == 1 { "" } else { "s" }));
+    }
+
+    if delta < 2_629_746 {
+        let weeks = delta / 604_800;
+        return Some(format!("{weeks} week{} ago", if weeks == 1 { "" } else { "s" }));
+    }
+
+    if delta < 31_556_952 {
+        let months = delta / 2_629_746;
+        return Some(format!("{months} month{} ago", if months == 1 { "" } else { "s" }));
+    }
+
+    let years = delta / 31_556_952;
+    Some(format!("{years} year{} ago", if years == 1 { "" } else { "s" }))
 }
 
 // ─── Status pill ──────────────────────────────────────────────────────────────
@@ -444,16 +564,8 @@ fn ModRow(mod_data: InstalledMod) -> Element {
 fn StatusPill(color: &'static str, text_color: &'static str, label: &'static str) -> Element {
     rsx! {
         span {
-            style: "
-                display: inline-block;
-                background: {color};
-                color: {text_color};
-                font-size: 11px;
-                font-weight: 600;
-                padding: 3px 10px;
-                border-radius: 99px;
-                letter-spacing: 0.04em;
-            ",
+            class: "inline-block text-[11px] font-semibold py-[3px] px-2.5 rounded-full tracking-[0.04em]",
+            style: "background: {color}; color: {text_color};",
             "{label}"
         }
     }
@@ -464,18 +576,8 @@ fn StatusPill(color: &'static str, text_color: &'static str, label: &'static str
 #[component]
 fn LoadingState() -> Element {
     rsx! {
-        div {
-            style: "
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                height: 300px;
-                gap: 12px;
-                color: #4b5563;
-                font-size: 13px;
-            ",
-            span { style: "font-size: 24px;", "⟳" }
+        div { class: "flex flex-col items-center justify-center h-[300px] gap-3 text-[#b0b8c7] text-[13px]",
+            span { class: "text-2xl", "⟳" }
             span { "Scanning mods…" }
         }
     }
@@ -486,29 +588,10 @@ fn LoadingState() -> Element {
 #[component]
 fn EmptyState() -> Element {
     rsx! {
-        div {
-            style: "
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                height: 300px;
-                gap: 10px;
-                color: #4b5563;
-                text-align: center;
-            ",
-            div {
-                style: "font-size: 32px; opacity: 0.4;",
-                "⬡"
-            }
-            div {
-                style: "font-size: 14px; color: #6b7280;",
-                "No mods scanned yet"
-            }
-            div {
-                style: "font-size: 12px; color: #374151;",
-                "Press Scan Mods to find your installed mods"
-            }
+        div { class: "flex flex-col items-center justify-center h-[300px] gap-2.5 text-[#aab0bb] text-center",
+            div { class: "text-[32px] opacity-40", "⬡" }
+            div { class: "text-sm text-[#b0b8c7]", "No mods scanned yet" }
+            div { class: "text-xs text-[#9ca3af]", "Press Scan Mods to find your installed mods" }
         }
     }
 }
@@ -520,30 +603,11 @@ fn ErrorBanner(message: String) -> Element {
     let mut state: AppState = use_context();
 
     rsx! {
-        div {
-            style: "
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                background: #1f0e0e;
-                border-bottom: 1px solid #3d1515;
-                padding: 10px 20px;
-                font-size: 12px;
-                color: #e06060;
-                flex-shrink: 0;
-            ",
+        div { class: "flex items-center justify-between bg-[#1f0e0e] border-b border-[#3d1515] px-5 py-2.5 text-xs text-[#e06060] shrink-0",
             span { "{message}" }
             button {
                 onclick: move |_| *state.error.write() = None,
-                style: "
-                    background: none;
-                    border: none;
-                    color: #e06060;
-                    cursor: pointer;
-                    font-size: 16px;
-                    padding: 0 4px;
-                    opacity: 0.7;
-                ",
+                class: "bg-transparent border-none text-[#e06060] cursor-pointer text-base px-1 opacity-70",
                 "×"
             }
         }

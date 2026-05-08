@@ -1,7 +1,7 @@
 // config.rs
 //
 // Owns the user's persisted settings: their Mods/ path override,
-// Nexus API key (stored in OS keychain, not here), and UI preferences.
+// Nexus API key state, and UI preferences.
 //
 // Serialized to JSON at the path returned by `paths::config_file()`.
 //
@@ -32,9 +32,8 @@ pub struct AppConfig {
     /// Some players prefer to hide them to reduce noise.
     pub show_unknown_source_mods: bool,
 
-    /// Nexus API key is NOT stored here — it lives in the OS keychain
-    /// via the `keyring` crate. This flag just tracks whether one has
-    /// been saved, so the UI knows whether to show the "add key" prompt.
+    /// This flag tracks whether an API key has been saved.
+    /// The key value itself lives in a separate local file.
     pub nexus_api_key_saved: bool,
 }
 
@@ -101,21 +100,21 @@ impl AppConfig {
     }
 }
 
-// ─── Nexus API key (OS keychain) ──────────────────────────────────────────────
-//
-// The API key is sensitive, so we store it in the OS keychain via `keyring`,
-// not in the JSON config. These helpers keep the keyring calls in one place.
+// ─── Nexus API key (local file) ───────────────────────────────────────────────
 
-const KEYRING_SERVICE: &str = "stardew-mod-manager";
-const KEYRING_USERNAME: &str = "nexus-api-key";
-
-/// Save the Nexus API key to the OS keychain and mark it saved in config.
+/// Save the Nexus API key to a local config file and mark it saved in config.
 pub fn save_api_key(config: &mut AppConfig, key: &str) -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .context("Failed to access OS keychain")?;
+    let path = paths::nexus_api_key_file()?;
+    let trimmed = key.trim();
 
-    entry.set_password(key)
-        .context("Failed to save API key to keychain")?;
+    std::fs::write(&path, trimmed)
+        .with_context(|| format!("Failed to save API key: {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
 
     config.nexus_api_key_saved = true;
     config.save()?;
@@ -123,28 +122,31 @@ pub fn save_api_key(config: &mut AppConfig, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Retrieve the Nexus API key from the OS keychain.
+/// Retrieve the Nexus API key from local config storage.
 /// Returns `None` if no key has been saved yet.
 pub fn load_api_key() -> Result<Option<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .context("Failed to access OS keychain")?;
-
-    match entry.get_password() {
-        Ok(key) => Ok(Some(key)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e).context("Failed to read API key from keychain"),
+    let path = paths::nexus_api_key_file()?;
+    if !path.exists() {
+        return Ok(None);
     }
+
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read API key: {}", path.display()))?;
+    let key = raw.trim().to_string();
+
+    if key.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(key))
 }
 
 /// Delete the stored API key and update config.
 pub fn delete_api_key(config: &mut AppConfig) -> Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .context("Failed to access OS keychain")?;
-
-    // Ignore NoEntry — deleting a key that doesn't exist is a no-op
-    match entry.delete_password() {
-        Ok(_) | Err(keyring::Error::NoEntry) => {}
-        Err(e) => return Err(e).context("Failed to delete API key from keychain"),
+    let path = paths::nexus_api_key_file()?;
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove API key: {}", path.display()))?;
     }
 
     config.nexus_api_key_saved = false;

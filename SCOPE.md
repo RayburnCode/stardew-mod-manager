@@ -78,7 +78,7 @@ The `UpdateKeys` field is critical — it tells you where to check for updates (
 ### Steps
 
 1. Add a settings screen where the user pastes their Nexus API key
-2. Store the API key securely using OS keychain (use the `keyring` crate)
+2. Store the API key in app-local config storage (no OS keychain prompt) and restrict file permissions where supported
 3. Create a `NexusClient` struct wrapping `reqwest::Client` with the API key header set
 4. Write `fetch_mod_info(client: &NexusClient, mod_id: u32) -> Result<NexusModInfo>`
 5. Parse the response into a `NexusModInfo` struct (capture: `version`, `name`, `updated_timestamp`)
@@ -89,7 +89,7 @@ The `UpdateKeys` field is critical — it tells you where to check for updates (
 ### Acceptance Criteria
 
 - Latest version is fetched and displayed next to each mod's installed version
-- API key is not stored in plaintext
+- API key is stored outside source control in app-local config data, and access is restricted by file permissions where supported
 - Rate limit errors (HTTP 429) are caught and shown as a friendly message
 - Mods without a `Nexus:` update key are gracefully skipped (show "no update source")
 
@@ -215,7 +215,6 @@ On "Update" click
 | `serde` + `serde_json`      | Deserialize `manifest.json` and API responses |
 | `semver`                    | Version parsing and comparison                |
 | `dirs`                      | Cross-platform home/app directory paths       |
-| `keyring`                   | Secure OS keychain storage for API key        |
 | `zip`                       | Extract downloaded mod archives               |
 | `futures`                   | `join_all` for concurrent API fetches         |
 
@@ -229,3 +228,96 @@ On "Update" click
 - **SMAPI itself** lives in the `Mods/` folder but isn't a regular mod. Skip it or display it separately.
 - **Version strings aren't always semver** — some mods use `1.0` or `1.0.0.0`. Be defensive in parsing.
 - **Rate limiting** — if a user has 100+ mods, you may hit the 100 req/hour limit. Batch requests where possible and show remaining quota.
+
+---
+
+## Ranked Implementation Plan (Pre-Release)
+
+Because the app is still pre-release, prioritize shipping reliability and UX quickly over long-term hardening.
+
+### P0 (Do Now)
+
+- [ ] **First-run API key migration (legacy keychain -> local storage)**
+  - Effort: **S** (0.5-1 day)
+  - Risk: **Low**
+  - Why now: prevents friction for anyone who already saved a key before storage changed.
+  - Acceptance criteria:
+    - [ ] On startup, if local key is missing, attempt one-time import from legacy keychain entry.
+    - [ ] If imported, write local key file, update config flag, and continue silently.
+    - [ ] If import fails, app continues without crashing and shows a non-blocking notice.
+
+- [ ] **Multi-stage progress states in scan/update pipeline**
+  - Effort: **M** (1-2 days)
+  - Risk: **Low**
+  - Why now: makes the app feel responsive and understandable immediately.
+  - Acceptance criteria:
+    - [ ] UI surfaces stage text: Discovering mods, Checking SMAPI, Checking Nexus, Merging results.
+    - [ ] Buttons reflect busy/disabled states consistently.
+    - [ ] Errors include which stage failed.
+
+- [ ] **Retry + backoff for transient network failures**
+  - Effort: **M** (1-2 days)
+  - Risk: **Medium**
+  - Why now: significantly improves reliability with unstable connections and API hiccups.
+  - Acceptance criteria:
+    - [ ] Retry policy for timeout and 5xx responses (bounded attempts).
+    - [ ] No retries for 4xx auth/rate-limit errors.
+    - [ ] Final user-facing errors are concise and actionable.
+
+### P1 (Next)
+
+- [ ] **SMAPI response cache with TTL**
+  - Effort: **M** (1-2 days)
+  - Risk: **Low-Medium**
+  - Why next: reduces repeated API load and speeds up subsequent update checks.
+  - Acceptance criteria:
+    - [ ] SMAPI results cached with timestamps and configurable TTL.
+    - [ ] Cache can be cleared from Settings.
+    - [ ] Expired entries trigger fresh fetch.
+
+- [ ] **Filter + sort controls for mod list**
+  - Effort: **M** (2-3 days)
+  - Risk: **Low**
+  - Why next: essential for larger mod collections and day-to-day usability.
+  - Acceptance criteria:
+    - [ ] Filters: Show all, Updates only, Unknown source.
+    - [ ] Sort: Name, Status, Installed version.
+    - [ ] Operations are local (no forced re-fetch).
+
+### P2 (Stabilization)
+
+- [ ] **Integration tests for discovery and merge logic**
+  - Effort: **M-L** (2-4 days)
+  - Risk: **Medium**
+  - Why later: improves confidence before beta/public rollout.
+  - Acceptance criteria:
+    - [ ] Fixture-based tests cover malformed manifests, nested folders, and merge precedence.
+    - [ ] Mocked API responses validate Nexus/SMAPI conflict resolution.
+    - [ ] CI runs tests on macOS, Windows, and Linux targets where possible.
+
+- [ ] **Opt-in diagnostics mode**
+  - Effort: **M** (2-3 days)
+  - Risk: **Medium**
+  - Why later: useful for debugging but not required for core functionality.
+  - Acceptance criteria:
+    - [ ] Toggle in Settings enables structured diagnostics.
+    - [ ] Captures timings, item counts, and error classes only.
+    - [ ] Redacts API key and file contents by default.
+
+### P3 (Security Hardening)
+
+- [ ] **Encrypt API key at rest (no keychain UX)**
+  - Effort: **L** (3-5+ days)
+  - Risk: **High**
+  - Why last: larger design/UX tradeoffs; defer until core workflows are stable.
+  - Acceptance criteria:
+    - [ ] Key material is unreadable at rest.
+    - [ ] Decryption and recovery flows are documented and tested.
+    - [ ] Upgrade path from plaintext local key is automatic and safe.
+
+### Suggested Delivery Waves
+
+- [ ] **Wave 1 (Reliability + UX):** Items 1-3
+- [ ] **Wave 2 (Performance + list usability):** Items 4-5
+- [ ] **Wave 3 (Quality + supportability):** Items 6-7
+- [ ] **Wave 4 (Security hardening):** Item 8

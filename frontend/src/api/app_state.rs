@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 #[derive(Clone, PartialEq)]
 pub enum Screen {
     ModList,
+    Installer,
     Settings,
 }
 

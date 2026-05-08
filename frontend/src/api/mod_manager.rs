@@ -26,6 +26,7 @@ pub struct ModManifest {
     #[serde(default)]
     pub description: String,
 
+    #[serde(rename = "UniqueID", alias = "UniqueId")]
     pub unique_id: String,
 
     /// e.g. ["Nexus:2400", "GitHub:Pathoschild/SMAPI"]
@@ -63,7 +64,11 @@ pub enum ModStatus {
     /// Installed version matches latest on Nexus.
     UpToDate,
     /// Nexus has a newer version.
-    UpdateAvailable { latest: String },
+    UpdateAvailable {
+        latest: String,
+        /// Unix timestamp (seconds) for latest update publication time, when available.
+        updated_timestamp: Option<u64>,
+    },
     /// No Nexus update key, or Nexus fetch hasn't run yet.
     Unknown,
     /// Nexus fetch failed for this mod specifically.
@@ -74,8 +79,10 @@ pub enum ModStatus {
 
 /// Scan `mods_path` and return one `InstalledMod` per valid subdirectory.
 ///
-/// Subdirectories with no `manifest.json`, or with unparseable JSON,
-/// are logged as warnings and skipped — they never cause an error return.
+/// Subdirectories with no `manifest.json` are skipped quietly.
+/// If a directory is only a container (e.g. a modpack root), we also scan
+/// one nested level for real mod folders containing `manifest.json`.
+/// Unparseable JSON manifests are logged as warnings and skipped.
 /// SMAPI itself lives in the Mods folder but is skipped (UniqueID check).
 pub fn discover_mods(mods_path: &Path) -> Result<Vec<InstalledMod>> {
     let entries = std::fs::read_dir(mods_path)
@@ -100,27 +107,41 @@ pub fn discover_mods(mods_path: &Path) -> Result<Vec<InstalledMod>> {
         }
 
         let manifest_path = path.join("manifest.json");
-        if !manifest_path.exists() {
-            eprintln!("[mods] No manifest.json in {}, skipping", path.display());
+        if manifest_path.exists() {
+            push_mod_if_valid(&mut mods, &path, &manifest_path);
             continue;
         }
 
-        match parse_manifest(&manifest_path) {
-            Ok(manifest) => {
-                // Skip SMAPI itself — it's in the Mods folder but isn't a mod
-                if manifest.unique_id == "Pathoschild.SMAPI" {
+        // Some mod bundles are container folders with actual mod manifests
+        // one directory deeper. Scan one nested level to find those mods.
+        let nested_entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!("[mods] Skipping unreadable nested entry in {}: {e}", path.display());
+                continue;
+            }
+        };
+
+        for nested in nested_entries {
+            let nested = match nested {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[mods] Skipping unreadable nested entry: {e}");
                     continue;
                 }
+            };
 
-                mods.push(InstalledMod {
-                    manifest,
-                    path,
-                    status: ModStatus::Unknown,
-                });
+            let nested_path = nested.path();
+            if !nested_path.is_dir() {
+                continue;
             }
-            Err(e) => {
-                eprintln!("[mods] Failed to parse {}: {e}", manifest_path.display());
+
+            let nested_manifest_path = nested_path.join("manifest.json");
+            if !nested_manifest_path.exists() {
+                continue;
             }
+
+            push_mod_if_valid(&mut mods, &nested_path, &nested_manifest_path);
         }
     }
 
@@ -128,6 +149,26 @@ pub fn discover_mods(mods_path: &Path) -> Result<Vec<InstalledMod>> {
     mods.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
 
     Ok(mods)
+}
+
+fn push_mod_if_valid(mods: &mut Vec<InstalledMod>, mod_path: &Path, manifest_path: &Path) {
+    match parse_manifest(manifest_path) {
+        Ok(manifest) => {
+            // Skip SMAPI itself — it's in the Mods folder but isn't a mod
+            if manifest.unique_id == "Pathoschild.SMAPI" {
+                return;
+            }
+
+            mods.push(InstalledMod {
+                manifest,
+                path: mod_path.to_path_buf(),
+                status: ModStatus::Unknown,
+            });
+        }
+        Err(e) => {
+            eprintln!("[mods] Failed to parse {}: {e}", manifest_path.display());
+        }
+    }
 }
 
 /// Parse a single `manifest.json` file into a `ModManifest`.

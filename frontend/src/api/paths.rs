@@ -23,7 +23,7 @@ pub fn default_mods_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
 
     let path = if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Steam/steamapps/common/Stardew Valley/Mods")
+        home.join("Library/Application Support/Steam/steamapps/common/Stardew Valley/Contents/MacOS/Mods")
     } else if cfg!(target_os = "windows") {
         // On Windows, Steam typically lives under Program Files (x86).
         // `dirs::home_dir()` gives us e.g. C:\Users\Alice, so we build
@@ -108,6 +108,11 @@ pub fn config_dir() -> Result<PathBuf> {
 /// Full path to the config file itself.
 pub fn config_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
+}
+
+/// Full path to the locally stored Nexus API key file.
+pub fn nexus_api_key_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("nexus_api_key.txt"))
 }
 
 /// `~/.cache/stardew-mod-manager/` (or OS equivalent)

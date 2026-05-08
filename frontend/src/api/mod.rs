@@ -1,6 +1,9 @@
 pub mod config;
 pub mod mod_manager;
 pub mod nexus;
+#[path = "smapi-api.rs"]
+pub mod smapi_api;
 pub mod paths;
 pub mod updater;
 pub mod app_state;
+pub mod installer;
