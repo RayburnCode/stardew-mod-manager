@@ -1,0 +1,26 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+authors = ["RayburnCode <rayburncode@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dioxus = { version = "0.7.8", features = ["router"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.145"
+reqwest = { version = "0.13.1", default-features = false, features = ["json"] }
+tokio = "1.52.2"
+dirs = "6.0.0"
+anyhow = "1.0.102"
+keyring = "2"
+
+[features]
+default = ["desktop"]
+# The feature that are only required for the web = ["dioxus/web"] build target should be optional and only enabled in the web = ["dioxus/web"] feature
+web = ["dioxus/web"]
+# The feature that are only required for the desktop = ["dioxus/desktop"] build target should be optional and only enabled in the desktop = ["dioxus/desktop"] feature
+desktop = ["dioxus/desktop"]
+# The feature that are only required for the mobile = ["dioxus/mobile"] build target should be optional and only enabled in the mobile = ["dioxus/mobile"] feature
+mobile = ["dioxus/mobile"]
