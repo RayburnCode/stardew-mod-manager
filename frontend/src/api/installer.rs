@@ -22,18 +22,23 @@ pub struct InstallResult {
     pub was_update: bool,
 }
 
-/// Install a mod from a zip file path into the given Mods/ directory.
+/// Install a mod from a zip file or extracted folder into the given Mods/ directory.
 /// Safe to call with both new mods and updates — detects existing install.
-pub fn install_from_zip(zip_path: &Path, mods_dir: &Path) -> Result<InstallResult> {
-    // 1. Extract to a temp staging directory
-    let staging = tempfile::tempdir()
-        .context("Failed to create staging directory")?;
+pub fn install_from_source(source_path: &Path, mods_dir: &Path) -> Result<InstallResult> {
+    let mod_root = if source_path.is_dir() {
+        find_mod_root(source_path)
+            .context("Could not find manifest.json inside folder — may not be a valid SMAPI mod")?
+    } else {
+        // 1. Extract to a temp staging directory
+        let staging = tempfile::tempdir()
+            .context("Failed to create staging directory")?;
 
-    extract_zip(zip_path, staging.path())?;
+        extract_zip(source_path, staging.path())?;
 
-    // 2. Find the actual mod root inside the zip (handles all 3 packaging cases)
-    let mod_root = find_mod_root(staging.path())
-        .context("Could not find manifest.json inside zip — may not be a valid SMAPI mod")?;
+        // 2. Find the actual mod root inside the zip (handles all 3 packaging cases)
+        find_mod_root(staging.path())
+            .context("Could not find manifest.json inside zip — may not be a valid SMAPI mod")?
+    };
 
     // 3. Parse the manifest so we know the mod's name and ID
     let manifest = parse_manifest(&mod_root.join("manifest.json"))?;

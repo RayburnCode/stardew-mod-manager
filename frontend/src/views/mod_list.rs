@@ -72,7 +72,7 @@ fn Toolbar() -> Element {
     let state_for_check = state.clone();
     let loading = *state.loading.read();
 
-    // Scan mods folder and then fetch Nexus data
+    // Scan mods folder only. Network checks are handled separately.
     let on_scan = move |_| {
         let mut state = state_for_scan.clone();
         spawn(async move {
@@ -101,68 +101,6 @@ fn Toolbar() -> Element {
             };
 
             *state.mods.write() = discovered.clone();
-
-            // 3. Fetch Nexus data if API key is set
-            if !config.nexus_api_key_saved {
-                *state.loading.write() = false;
-                return;
-            }
-
-            let api_key = match crate::api::config::load_api_key() {
-                Ok(Some(k)) => k,
-                Ok(None) => {
-                    *state.loading.write() = false;
-                    return;
-                }
-                Err(e) => {
-                    *state.error.write() = Some(format!("API key read error: {e}"));
-                    *state.loading.write() = false;
-                    return;
-                }
-            };
-
-            let mut client = match NexusClient::new(&api_key, config.cache_ttl_seconds) {
-                Ok(c) => c,
-                Err(e) => {
-                    *state.error.write() = Some(format!("API client error: {e}"));
-                    *state.loading.write() = false;
-                    return;
-                }
-            };
-
-            // Collect Nexus IDs for mods that have them
-            let nexus_ids: Vec<u32> = discovered
-                .iter()
-                .filter_map(|m| m.manifest.nexus_id())
-                .collect();
-
-            let results = client.fetch_many(&nexus_ids).await;
-
-            // Apply statuses back to the mod list
-            let updated_mods: Vec<InstalledMod> = discovered
-                .into_iter()
-                .map(|mut m| {
-                    if let Some(nexus_id) = m.manifest.nexus_id() {
-                        m.status = match results.get(&nexus_id) {
-                            Some(Ok(info)) => {
-                                if crate::api::mod_manager::is_update_available(&m.manifest.version, &info.version) {
-                                    ModStatus::UpdateAvailable {
-                                        latest: info.version.clone(),
-                                        updated_timestamp: Some(info.updated_timestamp),
-                                    }
-                                } else {
-                                    ModStatus::UpToDate
-                                }
-                            }
-                            Some(Err(e)) => ModStatus::FetchFailed { reason: e.to_string() },
-                            None => ModStatus::Unknown,
-                        };
-                    }
-                    m
-                })
-                .collect();
-
-            *state.mods.write() = updated_mods;
             *state.loading.write() = false;
         });
     };
@@ -203,12 +141,7 @@ fn Toolbar() -> Element {
                 return;
             }
 
-            // SMAPI — covers all update_keys sources, no API key required
-            let smapi_updates = crate::api::smapi_api::fetch_latest_versions(&base_mods)
-                .await
-                .unwrap_or_default();
-
-            // Nexus — only if an API key is configured
+            // Fetch from Nexus only
             let nexus_results = if config.nexus_api_key_saved {
                 if let Ok(Some(api_key)) = crate::api::config::load_api_key() {
                     match NexusClient::new(&api_key, config.cache_ttl_seconds) {
@@ -217,7 +150,7 @@ fn Toolbar() -> Element {
                                 .iter()
                                 .filter_map(|m| m.manifest.nexus_id())
                                 .collect();
-                            client.fetch_many(&nexus_ids).await
+                            client.fetch_many_with_versions(&nexus_ids).await
                         }
                         Err(_) => std::collections::HashMap::new(),
                     }
@@ -228,38 +161,28 @@ fn Toolbar() -> Element {
                 std::collections::HashMap::new()
             };
 
-            // Merge: prefer whichever source reports the newer version
+            // Update mod statuses based on Nexus data
             let updated_mods: Vec<InstalledMod> = base_mods
                 .into_iter()
                 .map(|mut m| {
-                    let smapi_latest = smapi_updates.get(&m.manifest.unique_id).cloned();
-                    let nexus_latest = m.manifest.nexus_id()
-                        .and_then(|id| nexus_results.get(&id))
-                        .and_then(|r| r.as_ref().ok())
-                        .filter(|info| crate::api::mod_manager::is_update_available(&m.manifest.version, &info.version))
-                        .map(|info| (info.version.clone(), Some(info.updated_timestamp)));
-
-                    let best = match (smapi_latest, nexus_latest) {
-                        (Some(s), Some(n)) => {
-                            // Both report an update — pick the higher version
-                            Some(if crate::api::mod_manager::is_update_available(&s.latest_version, &n.0) {
-                                n
-                            } else {
-                                (s.latest_version, s.updated_timestamp)
+                    m.status = if let Some(nexus_id) = m.manifest.nexus_id() {
+                        // Mod has Nexus key — check Nexus for updates
+                        nexus_results.get(&nexus_id)
+                            .and_then(|r| r.as_ref().ok())
+                            .and_then(|(_, version_info)| {
+                                if crate::api::mod_manager::is_update_available(&m.manifest.version, &version_info.version) {
+                                    Some(ModStatus::UpdateAvailable {
+                                        latest: version_info.version.clone(),
+                                        updated_timestamp: Some(version_info.updated_timestamp),
+                                    })
+                                } else {
+                                    None
+                                }
                             })
-                        }
-                        (Some(s), None) => Some((s.latest_version, s.updated_timestamp)),
-                        (None, Some(n)) => Some(n),
-                        (None, None) => None,
-                    };
-
-                    m.status = if let Some((latest, updated_timestamp)) = best {
-                        ModStatus::UpdateAvailable {
-                            latest,
-                            updated_timestamp,
-                        }
+                            .unwrap_or(ModStatus::UpToDate)
                     } else {
-                        ModStatus::UpToDate
+                        // No Nexus key — can't check for updates
+                        ModStatus::Unknown
                     };
                     m
                 })
@@ -277,7 +200,7 @@ fn Toolbar() -> Element {
                     "Step 1: Scan   Step 2: Check updates"
                 }
                 span { class: "text-xs text-[#aab0bb]",
-                    "Scan reads your Mods folder. Check updates compares installed versions with SMAPI/Nexus."
+                    "Scan reads your Mods folder only. Check updates compares installed versions with Nexus."
                 }
             }
 
@@ -386,7 +309,7 @@ fn ModRow(mod_data: InstalledMod) -> Element {
                         }
                     };
 
-                    let mut client = match NexusClient::new(&api_key, config.cache_ttl_seconds) {
+                    let client = match NexusClient::new(&api_key, config.cache_ttl_seconds) {
                         Ok(c) => c,
                         Err(e) => {
                             *state.error.write() = Some(format!("Client error: {e}"));

@@ -3,6 +3,8 @@
 **/*.rs.bk
 Cargo.lock
 
+
+
 # Frontend build artifacts
 web/dist/
 web/docs/assets/

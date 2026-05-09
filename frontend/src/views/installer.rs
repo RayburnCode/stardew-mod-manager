@@ -4,14 +4,14 @@
 //   1. A drag-and-drop zone
 //   2. A "Browse…" button that opens a native file picker
 //
-// Both feed into installer::install_from_zip().
+// Both feed into installer::install_from_source().
 
 use dioxus::prelude::*;
 use dioxus::html::HasFileData;
 use rfd::FileDialog;
 use crate::api::app_state::AppState;
 use crate::api::installer;
-use crate::api::mod_manager::ModStatus;
+use crate::api::mod_manager::{InstalledMod, ModStatus};
 
 #[component]
 pub fn InstallZone() -> Element {
@@ -27,9 +27,8 @@ pub fn InstallZone() -> Element {
         spawn(async move {
             // rfd opens a native macOS Open panel — blocks until user picks
             let picked = FileDialog::new()
-                .add_filter("Mod zip", &["zip"])
-                .set_title("Select a mod zip file")
-                .pick_file();
+                .set_title("Select a mod folder")
+                .pick_folder();
 
             if let Some(path) = picked {
                 run_install(path, &mut state, &mut install_msg).await;
@@ -53,16 +52,17 @@ pub fn InstallZone() -> Element {
         evt.prevent_default();
         *drag_over.write() = false;
 
-        let dropped_zip = evt
+        let dropped_source = evt
+            .data()
             .files()
             .into_iter()
-            .map(|file| std::path::PathBuf::from(file.name()))
-            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("zip"));
+            .map(|file| file.path())
+            .find(|p| p.is_dir() || p.extension().and_then(|e| e.to_str()) == Some("zip"));
 
         let mut state = state_for_drop.clone();
         spawn(async move {
-            if let Some(zip_path) = dropped_zip {
-                run_install(zip_path, &mut state, &mut install_msg).await;
+            if let Some(source_path) = dropped_source {
+                run_install(source_path, &mut state, &mut install_msg).await;
             }
         });
     };
@@ -83,7 +83,7 @@ pub fn InstallZone() -> Element {
                     "Install Mod"
                 }
                 div { class: "text-xs text-[#b0b8c7]",
-                    "Drop a zip or browse for one. Existing installs are backed up before replacement."
+                    "Drop a mod folder or zip, or browse for a folder. Existing installs are backed up before replacement."
                 }
             }
 
@@ -100,7 +100,7 @@ pub fn InstallZone() -> Element {
                     style: "border-color: {border_color}; background: {bg};",
 
                     div { class: "text-3xl opacity-40", "⬇" }
-                    div { class: "text-sm text-[#b0b8c7]", "Drop a mod zip here" }
+                    div { class: "text-sm text-[#b0b8c7]", "Drop a mod folder or zip here" }
 
                     // Browse button
                     button {
@@ -109,7 +109,7 @@ pub fn InstallZone() -> Element {
                             bg-[#1a2035] border border-[#2d3552] text-[#7ec8a4] \
                             hover:border-[#7ec8a4] hover:text-[#7ec8a4] \
                             transition-colors duration-150",
-                        "Browse..."
+                        "Browse Folder..."
                     }
                 }
 
@@ -124,7 +124,7 @@ pub fn InstallZone() -> Element {
 
 /// Shared install logic called by both picker and drag-drop paths.
 async fn run_install(
-    zip_path: std::path::PathBuf,
+    source_path: std::path::PathBuf,
     state: &mut AppState,
     msg: &mut Signal<Option<(String, bool)>>,
 ) {
@@ -135,7 +135,7 @@ async fn run_install(
         return;
     };
 
-    match installer::install_from_zip(&zip_path, &mods_dir) {
+    match installer::install_from_source(&source_path, &mods_dir) {
         Ok(result) => {
             let verb = if result.was_update { "Updated" } else { "Installed" };
             *msg.write() = Some((
@@ -151,13 +151,12 @@ async fn run_install(
                     m.status = ModStatus::UpToDate;
                 }
             } else {
-                // New mod — push it and let the user rescan for full status
-                // (we don't have a path reference here without a rescan)
-                // Simplest: just signal that a rescan would be helpful
-                *msg.write() = Some((
-                    format!("Installed {}. Press Scan Mods to refresh the list.", result.manifest.name),
-                    false,
-                ));
+                let mod_path = mods_dir.join(&result.mod_folder);
+                mods.push(InstalledMod {
+                    manifest: result.manifest,
+                    path: mod_path,
+                    status: ModStatus::UpToDate,
+                });
             }
         }
         Err(e) => {

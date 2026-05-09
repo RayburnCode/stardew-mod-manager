@@ -25,9 +25,14 @@ const GAME_DOMAIN: &str = "stardewvalley";
 pub struct NexusModInfo {
     pub mod_id: u32,
     pub name: String,
-    pub version: String,       // latest uploaded version string
     pub author: String,
     pub summary: String,
+}
+
+/// Version info extracted from the primary file
+#[derive(Debug, Clone)]
+pub struct ModVersion {
+    pub version: String,
     pub updated_timestamp: u64,
 }
 
@@ -179,34 +184,34 @@ impl NexusClient {
         Ok(info)
     }
 
-    /// Fetch mod info for multiple mod IDs concurrently.
-    /// Returns a map of mod_id → Result so partial failures don't abort the batch.
-    pub async fn fetch_many(
+    /// Fetch mod info AND latest file version for multiple mod IDs.
+    /// Returns a map of mod_id → (mod_info, version) tuple
+    pub async fn fetch_many_with_versions(
         &mut self,
         mod_ids: &[u32],
-    ) -> HashMap<u32, Result<NexusModInfo>> {
-        // We need to run requests concurrently but `self` can't be borrowed
-        // mutably across concurrent futures. So we split: check cache first
-        // for all IDs, then fire off HTTP requests only for the misses.
-
-        let mut results: HashMap<u32, Result<NexusModInfo>> = HashMap::new();
+    ) -> HashMap<u32, Result<(NexusModInfo, ModVersion)>> {
+        let mut results: HashMap<u32, Result<(NexusModInfo, ModVersion)>> = HashMap::new();
         let mut to_fetch: Vec<u32> = Vec::new();
 
+        // Check cache first
         for &id in mod_ids {
             if let Some(cached) = self.cache.get(id, self.ttl_seconds) {
-                results.insert(id, Ok(cached.clone()));
+                results.insert(id, Ok((cached.clone(), ModVersion {
+                    version: "cached".to_string(),
+                    updated_timestamp: 0,
+                })));
             } else {
                 to_fetch.push(id);
             }
         }
 
-        // Fire all cache-miss requests concurrently
+        // Fetch uncached mod info concurrently
         if !to_fetch.is_empty() {
             let futures: Vec<_> = to_fetch
                 .iter()
                 .map(|&id| {
                     let url = format!("{BASE_URL}/games/{GAME_DOMAIN}/mods/{id}.json");
-                    let client = self.http.clone(); // reqwest::Client is Arc-backed, cheap clone
+                    let client = self.http.clone();
                     async move {
                         let resp = client.get(&url).send().await;
                         (id, resp)
@@ -238,7 +243,23 @@ impl NexusClient {
                     self.cache.insert(id, info.clone());
                 }
 
-                results.insert(id, entry);
+                // For each mod, fetch its latest file version
+                let version_entry = if let Ok(ref info) = entry {
+                    match self.latest_main_file(id).await {
+                        Ok(file) => Ok((info.clone(), ModVersion {
+                            version: file.version.clone(),
+                            updated_timestamp: 0,
+                        })),
+                        Err(e) => Err(anyhow::anyhow!("Could not fetch latest file: {}", e)),
+                    }
+                } else {
+                    entry.map(|info| (info, ModVersion {
+                        version: "unknown".to_string(),
+                        updated_timestamp: 0,
+                    }))
+                };
+
+                results.insert(id, version_entry);
             }
 
             self.cache.save();
